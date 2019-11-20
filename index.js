@@ -6,12 +6,19 @@ var fs = require('fs');
 var s3 = require('s3');
 
 function S3Zipper(awsConfig) {
-    assert.ok(awsConfig, 'AWS S3 options must be defined.');
-    assert.notEqual(awsConfig.accessKeyId, undefined, 'Requires S3 AWS Key.');
-    assert.notEqual(awsConfig.secretAccessKey, undefined, 'Requires S3 AWS Secret');
-    assert.notEqual(awsConfig.region, undefined, 'Requires AWS S3 region.');
-    assert.notEqual(awsConfig.bucket, undefined, 'Requires AWS S3 bucket.');
-    this.init(awsConfig);
+    var self = this
+    AWS.config.getCredentials(function (err) {
+        if (err) {
+            assert.ok(awsConfig, 'AWS S3 options must be defined.');
+            assert.notEqual(awsConfig.accessKeyId, undefined, 'Requires S3 AWS Key.');
+            assert.notEqual(awsConfig.secretAccessKey, undefined, 'Requires S3 AWS Secret');
+            assert.notEqual(awsConfig.region, undefined, 'Requires AWS S3 region.');
+            assert.notEqual(awsConfig.bucket, undefined, 'Requires AWS S3 bucket.');
+            self.init(awsConfig);
+        } else {
+            self.init(awsConfig)
+        }
+    })
 }
 
 
@@ -23,16 +30,30 @@ function listObjectInner() {
 S3Zipper.prototype = {
     init: function (awsConfig) {
         this.awsConfig = awsConfig;
-        AWS.config.update({
-            accessKeyId: awsConfig.accessKeyId,
-            secretAccessKey: awsConfig.secretAccessKey,
-            region: awsConfig.region
-        });
-        this.s3bucket = new AWS.S3({
-            params: {
-                Bucket: this.awsConfig.bucket
+        var self = this
+        AWS.config.getCredentials(function (err) {
+
+            if (err) {
+                AWS.config.update({
+                    accessKeyId: awsConfig.accessKeyId,
+                    secretAccessKey: awsConfig.secretAccessKey,
+                    region: awsConfig.region
+                });
             }
-        });
+
+            if (awsConfig.endpoint) {
+                AWS.config.update({
+                    endpoint: awsConfig.endpoint
+                });
+            }
+
+            self.s3bucket = new AWS.S3({
+                params: {
+                    Bucket: self.awsConfig.bucket
+                }
+            });
+
+        })
 
     }
     , filterOutFiles: function (fileObj) {
@@ -56,15 +77,15 @@ S3Zipper.prototype = {
      };
      callback = function that is called back when completed
     * */
-    , getFiles: function (params,callback) {
+    , getFiles: function (params, callback) {
 
-        if(arguments.length == 5){ //for backwards comparability
-            params={
+        if (arguments.length == 5) { //for backwards comparability
+            params = {
                 folderName: arguments[0]
                 , startKey: arguments[1]
                 , maxFileCount: arguments[2]
                 , maxFileSize: arguments[3]
-                , recursive:false
+                , recursive: false
             };
             callback = arguments[4];
         }
@@ -79,7 +100,7 @@ S3Zipper.prototype = {
         if (params.startKey)
             bucketParams.Marker = params.startKey;
 
-        if (typeof(params.maxFileCount) == "function" && typeof(callback) == "undefined") {
+        if (typeof (params.maxFileCount) == "function" && typeof (callback) == "undefined") {
             callback = params.maxFileCount;
             params.maxFileCount = null;
         }
@@ -88,7 +109,7 @@ S3Zipper.prototype = {
 
         var t = this;
 
-        var files ={};
+        var files = {};
         files.Contents = [];
 
         var options = {
@@ -104,7 +125,7 @@ S3Zipper.prototype = {
 
         var emitter = client.listObjects(realParams);
         emitter.on('data', function (data) {
-            if(data && data.Contents) {
+            if (data && data.Contents) {
                 files.Contents = files.Contents.concat(data.Contents);
             }
         });
@@ -142,7 +163,7 @@ S3Zipper.prototype = {
                 lastScannedFile = data.Contents[i];
             }
 
-            callback(null, {files: result, totalFilesScanned: data.Contents.length, lastScannedFile: lastScannedFile});
+            callback(null, { files: result, totalFilesScanned: data.Contents.length, lastScannedFile: lastScannedFile });
         });
     }
 
@@ -170,56 +191,55 @@ S3Zipper.prototype = {
         var t = this;
 
         this.getFiles(params, function (err, clearedFiles) {
-           params['folderName'] = 'meta_properties';
-           t.getFiles(params, function (err1, metafiles) {
-            if (err || err1)
-                console.error(err);
-            else {
-                var files = clearedFiles.files;
-                var meta = metafiles.files;
-                files = files.concat(meta);
-                console.log("files", files);
-                
-                async.map(files, function (f, callback) {
-                    t.s3bucket.getObject({Bucket: t.awsConfig.bucket, Key: f.Key}, function (err, data) {
-                        if (err)
-                            callback(err);
-                        else {
-
-                            var name = t.calculateFileName(f);
-
-                            if (name === ""){
-                                callback(null, f);
-                                return;
-                            }
+            params['folderName'] = 'meta_properties';
+            t.getFiles(params, function (err1, metafiles) {
+                if (err || err1)
+                    console.error(err);
+                else {
+                    var files = clearedFiles.files;
+                    var meta = metafiles.files;
+                    files = files.concat(meta);
+                    console.log("files", files);
+                    async.map(files, function (f, callback) {
+                        t.s3bucket.getObject({ Bucket: t.awsConfig.bucket, Key: f.Key }, function (err, data) {
+                            if (err)
+                                callback(err);
                             else {
-                                console.log('zipping ', name, '...');
 
-                                zip.append(data.Body, {name: name});
-                                callback(null, f);
+                                var name = t.calculateFileName(f);
+
+                                if (name === "") {
+                                    callback(null, f);
+                                    return;
+                                }
+                                else {
+                                    console.log('zipping ', name, '...');
+
+                                    zip.append(data.Body, { name: name });
+                                    callback(null, f);
+                                }
+
                             }
 
-                        }
-
-                    });
-
-                }, function (err, results) {
-                    zip.manifest = results;
-                    zip.on('finish',function(){
-                        callback(err, {
-                            zip: zip,
-                            zippedFiles: results,
-                            totalFilesScanned: clearedFiles.totalFilesScanned,
-                            lastScannedFile: clearedFiles.lastScannedFile
                         });
+
+                    }, function (err, results) {
+                        zip.manifest = results;
+                        zip.on('finish', function () {
+                            callback(err, {
+                                zip: zip,
+                                zippedFiles: results,
+                                totalFilesScanned: clearedFiles.totalFilesScanned,
+                                lastScannedFile: clearedFiles.lastScannedFile
+                            });
+                        });
+                        zip.finalize();
+
+
+
                     });
-                    zip.finalize();
-
-
-
-                });
-            }
-           });
+                }
+            });
         });
 
     }
@@ -230,11 +250,11 @@ S3Zipper.prototype = {
         var readStream = fs.createReadStream(localFileName);//tempFile
 
         this.s3bucket.upload({
-                Bucket: this.awsConfig.bucket
-                , Key: s3ZipFileName
-                , ContentType: "application/zip"
-                , Body: readStream
-            })
+            Bucket: this.awsConfig.bucket
+            , Key: s3ZipFileName
+            , ContentType: "application/zip"
+            , Body: readStream
+        })
             .on('httpUploadProgress', function (e) {
                 var p = Math.round(e.loaded / e.total * 100);
                 if (p % 10 == 0)
@@ -264,15 +284,15 @@ S3Zipper.prototype = {
     */
     , zipToS3File: function (params, callback) {
 
-        if(arguments.length == 4){
+        if (arguments.length == 4) {
             // for backward compatibility
             params = {
-                s3FolderName:arguments[0]
-                ,startKey:arguments[1]
-                ,s3ZipFileName:arguments[2]
-                ,recursive: false
+                s3FolderName: arguments[0]
+                , startKey: arguments[1]
+                , s3ZipFileName: arguments[2]
+                , recursive: false
             };
-            callback= arguments[3];
+            callback = arguments[3];
         }
 
         var t = this;
@@ -285,18 +305,18 @@ S3Zipper.prototype = {
         this.zipToFile(params, function (err, r) {
 
             if (r && r.zippedFiles && r.zippedFiles.length) {
-                t.uploadLocalFileToS3( params.zipFileName, params.s3ZipFileName, function (err, result) {
+                t.uploadLocalFileToS3(params.zipFileName, params.s3ZipFileName, function (err, result) {
                     callback(null, {
                         zipFileETag: result.ETag,
                         zipFileLocation: result.Location,
                         zippedFiles: r.zippedFiles
                     });
-                    fs.unlink(params.zipFileName);
+                    fs.unlinkSync(params.zipFileName);
                 });
             }
             else {
                 console.log('no files zipped. nothing to upload');
-                fs.unlink(params.zipFileName);
+                fs.unlinkSync(params.zipFileName);
                 callback(null, {
                     zipFileETag: null,
                     zipFileLocation: null,
@@ -321,17 +341,17 @@ S3Zipper.prototype = {
     */
     , zipToS3FileFragments: function (params, callback) {
 
-        if(arguments.length == 6){
+        if (arguments.length == 6) {
             // for backward compatibility
             params = {
-                s3FolderName:arguments[0]
-                , startKey:arguments[1]
-                , s3ZipFileName:arguments[2]
-                , maxFileCount:arguments[3]
-                , maxFileSize:arguments[4]
+                s3FolderName: arguments[0]
+                , startKey: arguments[1]
+                , s3ZipFileName: arguments[2]
+                , maxFileCount: arguments[3]
+                , maxFileSize: arguments[4]
                 , recursive: false
             };
-            callback= arguments[5];
+            callback = arguments[5];
         }
 
         var t = this;
@@ -354,10 +374,10 @@ S3Zipper.prototype = {
             }
         })
             .onFileZipped = function (fragFileName, result) {
-            var s3fn = params.s3ZipFileName.replace(".zip", "_" + count + ".zip");
-            count++;
-            uploadFrag(s3fn, fragFileName, result);
-        };
+                var s3fn = params.s3ZipFileName.replace(".zip", "_" + count + ".zip");
+                count++;
+                uploadFrag(s3fn, fragFileName, result);
+            };
 
         var pendingUploads = 0;// prevent race condition
         function uploadFrag(s3FragName, localFragName, result) {
@@ -367,7 +387,7 @@ S3Zipper.prototype = {
                 if (uploadResult) {
                     result.uploadedFile = uploadResult;
                     console.log('remove temp file ', localFragName);
-                    fs.unlink(localFragName);
+                    fs.unlinkSync(localFragName);
                 }
                 pendingUploads--;
                 if (pendingUploads == 0 && finalResult) {
@@ -389,21 +409,21 @@ S3Zipper.prototype = {
      * */
     , zipToFile: function (params, callback) {
 
-        if(arguments.length == 4){
+        if (arguments.length == 4) {
             // for backward compatibility
             params = {
-                s3FolderName:arguments[0]
-                , startKey:arguments[1]
-                , zipFileName:arguments[2]
+                s3FolderName: arguments[0]
+                , startKey: arguments[1]
+                , zipFileName: arguments[2]
                 , recursive: false
             };
-            callback= arguments[3];
+            callback = arguments[3];
         }
 
         var filestream = fs.createWriteStream(params.zipFileName);
         this.streamZipDataTo({
             pipe: filestream
-            ,folderName: params.s3FolderName
+            , folderName: params.s3FolderName
             , startKey: params.startKey
             , maxFileCount: params.maxFileCount
             , maxFileSize: params.maxFileSize
@@ -429,17 +449,17 @@ S3Zipper.prototype = {
      */
     , zipToFileFragments: function (params, callback) {
 
-        if(arguments.length == 6){
+        if (arguments.length == 6) {
             // for backward compatibility
             params = {
-                s3FolderName:arguments[0]
-                , startKey:arguments[1]
-                , s3ZipFileName:arguments[2]
-                , maxFileCount:arguments[3]
-                , maxFileSize:arguments[4]
+                s3FolderName: arguments[0]
+                , startKey: arguments[1]
+                , s3ZipFileName: arguments[2]
+                , maxFileCount: arguments[3]
+                , maxFileSize: arguments[4]
                 , recursive: false
             };
-            callback= arguments[5];
+            callback = arguments[5];
         }
 
         var events = {
@@ -468,7 +488,7 @@ S3Zipper.prototype = {
                 fileStream.close();
                 if (result.zippedFiles.length == 0) /// its an empty zip file get rid of it
 
-                    fs.unlink(fragFileName);
+                    fs.unlinkSync(fragFileName);
 
                 else
                     events.onFileZipped(fragFileName, result);
@@ -480,12 +500,13 @@ S3Zipper.prototype = {
         function recursiveLoop(startKey, fragFileName, callback) {
             var fileStream = fs.createWriteStream(fragFileName);
             t.streamZipDataTo({
-                pipe : fileStream
+                pipe: fileStream
                 , folderName: params.s3FolderName
-                , startKey:startKey
-                , maxFileCount:params.maxFileCount
-                , maxFileSize:params.maxFileSize
-                , recursive: params.recursive }, function (err, result) {
+                , startKey: startKey
+                , maxFileCount: params.maxFileCount
+                , maxFileSize: params.maxFileSize
+                , recursive: params.recursive
+            }, function (err, result) {
 
                 if (err)
                     report.errors.push(err);
